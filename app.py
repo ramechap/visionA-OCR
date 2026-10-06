@@ -25,7 +25,8 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .stButton>button {
+
+    .stButton > button {
         width: 100%;
         border-radius: 8px;
         font-weight: bold;
@@ -35,14 +36,19 @@ st.markdown(
         border: none;
     }
 
-    .stButton>button:hover {
+    .stButton > button:hover {
         background-color: #E08900;
         color: white;
     }
 
-    h1, .subtitle {
+    h1 {
         text-align: center;
     }
+
+    .subtitle {
+        text-align: center;
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
@@ -58,7 +64,7 @@ st.title("🔤 Gemini OCR")
 st.markdown(
     """
     <p class="subtitle">
-    Extract readable text from images using Gemini Vision.
+    Extract text from images using Gemini Vision.
     </p>
     """,
     unsafe_allow_html=True,
@@ -72,10 +78,12 @@ st.markdown(
 api_key = st.secrets.get("GEMINI_API_KEY")
 
 if not api_key:
-    st.warning(
-        "⚠️ Add GEMINI_API_KEY in Streamlit Cloud → "
-        "Settings → Secrets."
+
+    st.error(
+        "GEMINI_API_KEY is missing. "
+        "Add it to Streamlit Cloud → Settings → Secrets."
     )
+
     st.stop()
 
 
@@ -83,37 +91,16 @@ if not api_key:
 # GEMINI CLIENT
 # ============================================================
 
-client = genai.Client(api_key=api_key)
+client = genai.Client(
+    api_key=api_key
+)
 
 
 # ============================================================
 # MODEL
 # ============================================================
 
-MODEL = "gemini-flash-latest"
-
-
-# ============================================================
-# IMAGE CONVERSION
-# ============================================================
-
-def image_part(img):
-    """
-    Convert PIL image into Gemini-compatible image Part.
-    """
-
-    buf = io.BytesIO()
-
-    img.save(
-        buf,
-        format="JPEG",
-        quality=95,
-    )
-
-    return types.Part.from_bytes(
-        data=buf.getvalue(),
-        mime_type="image/jpeg",
-    )
+MODEL = "gemini-3.8-flash"
 
 
 # ============================================================
@@ -125,144 +112,150 @@ You are an OCR engine.
 
 Extract ALL readable text from the image.
 
-Rules:
+IMPORTANT:
 
-1. Return ONLY the extracted text.
-2. Do NOT describe the image.
-3. Do NOT identify objects.
-4. Do NOT summarize anything.
-5. Do NOT add explanations.
-6. Preserve the original language.
-7. Preserve the original spelling as accurately as possible.
-8. Preserve line breaks and paragraphs when they are visually clear.
-9. Preserve numbers, punctuation, symbols, dates, prices, IDs,
-   URLs, email addresses, and special characters.
-10. If the image contains a table, preserve its structure as
-    clearly as possible using spaces, tabs, or lines.
-11. Read text from signs, labels, documents, screenshots,
-    handwriting, packaging, screens, and other visible areas.
-12. Do not invent text that is not visible.
-13. If there is no readable text, return exactly:
-    NO TEXT FOUND
+- Return ONLY the text visible in the image.
+- Do not describe the image.
+- Do not summarize the image.
+- Do not identify objects.
+- Do not answer questions.
+- Do not add explanations.
+- Do not add markdown.
+- Do not add quotation marks around the result.
+- Do not invent missing text.
 
-Return only the OCR result.
+OCR REQUIREMENTS:
+
+1. Extract every readable word.
+2. Preserve the original language.
+3. Preserve spelling as accurately as possible.
+4. Preserve capitalization where possible.
+5. Preserve numbers.
+6. Preserve punctuation.
+7. Preserve symbols.
+8. Preserve dates.
+9. Preserve prices.
+10. Preserve phone numbers.
+11. Preserve email addresses.
+12. Preserve URLs.
+13. Preserve IDs and codes.
+14. Preserve line breaks when visually clear.
+15. Preserve paragraph structure when possible.
+16. If there is a table, preserve the rows and columns
+    as clearly as possible using spaces or tabs.
+17. Read text from documents, signs, labels, screenshots,
+    receipts, forms, packaging, handwriting, and displays.
+18. Do not guess text that cannot be read.
+19. If there is no readable text, return exactly:
+
+NO TEXT FOUND
+
+Return ONLY the OCR text.
 """
 
 
 # ============================================================
-# OCR FUNCTION
+# IMAGE -> GEMINI PART
 # ============================================================
 
-def run_ocr(image):
+def image_part(image):
     """
-    Send image to Gemini and extract text.
+    Convert PIL image into a Gemini image Part.
     """
 
-    config = types.GenerateContentConfig(
-        response_mime_type="text/plain",
-        temperature=0,
+    buffer = io.BytesIO()
+
+    image.save(
+        buffer,
+        format="JPEG",
+        quality=95,
     )
 
-    errors = []
+    return types.Part.from_bytes(
+        data=buffer.getvalue(),
+        mime_type="image/jpeg",
+    )
 
-    # Try the primary model first.
-    models = [
-        MODEL,
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-    ]
 
-    # Remove duplicates while preserving order.
-    models = list(dict.fromkeys(models))
+# ============================================================
+# OCR
+# ============================================================
 
-    for model in models:
+def extract_text(image):
+    """
+    Send image to Gemini and return OCR text.
+    """
 
-        for attempt in range(3):
+    last_error = None
 
-            try:
+    # Retry temporary 503 errors.
+    for attempt in range(3):
 
-                response = client.models.generate_content(
-                    model=model,
-                    contents=[
-                        image_part(image),
-                        OCR_PROMPT,
-                    ],
-                    config=config,
+        try:
+
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=[
+                    image_part(image),
+                    OCR_PROMPT,
+                ],
+            )
+
+            if not response.text:
+
+                raise RuntimeError(
+                    "Gemini returned an empty response."
                 )
 
-                if response.text:
+            return response.text.strip()
 
-                    text = response.text.strip()
+        except Exception as e:
 
-                    return text, model
+            last_error = e
 
-                errors.append(
-                    f"{model}: empty response"
+            error_text = str(e).upper()
+
+            # Temporary server overload.
+            if (
+                "503" in error_text
+                or "UNAVAILABLE" in error_text
+            ):
+
+                if attempt < 2:
+
+                    wait_time = 3 * (attempt + 1)
+
+                    time.sleep(wait_time)
+
+                    continue
+
+            # Don't retry quota errors.
+            if (
+                "429" in error_text
+                or "RESOURCE_EXHAUSTED" in error_text
+                or "QUOTA" in error_text
+            ):
+
+                raise RuntimeError(
+                    "Gemini API quota/rate limit exceeded.\n\n"
+                    + str(e)
                 )
 
-                break
-
-            except Exception as e:
-
-                error_message = str(e)
-                upper_message = error_message.upper()
-
-                # ------------------------------------------------
-                # QUOTA / RATE LIMIT
-                # ------------------------------------------------
-
-                if (
-                    "429" in error_message
-                    or "RESOURCE_EXHAUSTED" in upper_message
-                    or "QUOTA" in upper_message
-                ):
-
-                    errors.append(
-                        f"{model}: quota/rate limit exhausted"
-                    )
-
-                    # Do not retry the same model.
-                    break
-
-                # ------------------------------------------------
-                # TEMPORARY SERVER ERROR
-                # ------------------------------------------------
-
-                if (
-                    "503" in error_message
-                    or "UNAVAILABLE" in upper_message
-                    or "500" in error_message
-                ):
-
-                    if attempt < 2:
-
-                        wait = 2 * (attempt + 1)
-
-                        time.sleep(wait)
-
-                        continue
-
-                # ------------------------------------------------
-                # OTHER ERROR
-                # ------------------------------------------------
-
-                errors.append(
-                    f"{model}: {error_message[:300]}"
-                )
-
-                break
+            # Don't retry other errors.
+            raise RuntimeError(
+                str(e)
+            )
 
     raise RuntimeError(
-        "OCR failed.\n\n"
-        + "\n".join(errors)
+        f"OCR failed after 3 attempts:\n{last_error}"
     )
 
 
 # ============================================================
-# IMAGE UPLOAD
+# FILE UPLOAD
 # ============================================================
 
-uploaded = st.file_uploader(
+uploaded_file = st.file_uploader(
     "Upload an image",
     type=[
         "jpg",
@@ -274,10 +267,10 @@ uploaded = st.file_uploader(
 
 
 # ============================================================
-# MAIN APP
+# MAIN
 # ============================================================
 
-if uploaded:
+if uploaded_file:
 
     # --------------------------------------------------------
     # LOAD IMAGE
@@ -286,7 +279,7 @@ if uploaded:
     try:
 
         image = Image.open(
-            uploaded
+            uploaded_file
         ).convert("RGB")
 
     except Exception as e:
@@ -299,24 +292,32 @@ if uploaded:
 
 
     # --------------------------------------------------------
-    # RESIZE LARGE IMAGE
+    # KEEP GOOD OCR RESOLUTION
     # --------------------------------------------------------
 
-    image.thumbnail(
-        (
-            4096,
-            4096,
+    max_dimension = 4096
+
+    if (
+        image.width > max_dimension
+        or image.height > max_dimension
+    ):
+
+        image.thumbnail(
+            (
+                max_dimension,
+                max_dimension,
+            ),
+            Image.Resampling.LANCZOS,
         )
-    )
 
 
     # --------------------------------------------------------
-    # DISPLAY IMAGE
+    # SHOW IMAGE
     # --------------------------------------------------------
 
     st.image(
         image,
-        caption=uploaded.name,
+        caption=uploaded_file.name,
         use_container_width=True,
     )
 
@@ -328,19 +329,19 @@ if uploaded:
     if st.button("🔤 Extract Text"):
 
         with st.spinner(
-            "Extracting text..."
+            "Reading text from image..."
         ):
 
             try:
 
-                extracted_text, used_model = run_ocr(
+                extracted_text = extract_text(
                     image
                 )
 
-                st.session_state["ocr_result"] = (
-                    uploaded.name,
+                # Store result.
+                st.session_state["ocr_text"] = (
+                    uploaded_file.name,
                     extracted_text,
-                    used_model,
                 )
 
             except Exception as e:
@@ -348,61 +349,72 @@ if uploaded:
                 error_text = str(e)
 
                 st.error(
-                    f"OCR failed: {error_text}"
+                    f"OCR failed:\n\n{error_text}"
                 )
 
+                # ------------------------------------------------
+                # FRIENDLY ERROR MESSAGES
+                # ------------------------------------------------
+
                 if (
-                    "429" in error_text
-                    or "RESOURCE_EXHAUSTED" in error_text
-                    or "quota" in error_text.lower()
-                ):
-
-                    st.warning(
-                        "Your Gemini API quota or rate limit "
-                        "appears to be exhausted."
-                    )
-
-                elif (
                     "503" in error_text
                     or "UNAVAILABLE" in error_text
                 ):
 
                     st.warning(
-                        "Gemini is temporarily unavailable. "
-                        "Please try again."
+                        "Gemini 3.8 Flash is temporarily "
+                        "experiencing high demand. "
+                        "The app automatically retried the request."
+                    )
+
+                elif (
+                    "429" in error_text
+                    or "RESOURCE_EXHAUSTED" in error_text
+                    or "QUOTA" in error_text.upper()
+                ):
+
+                    st.warning(
+                        "Your Gemini API quota or rate limit "
+                        "has been exhausted."
                     )
 
 
-    # --------------------------------------------------------
-    # OCR RESULT
-    # --------------------------------------------------------
+    # ========================================================
+    # DISPLAY RESULT
+    # ========================================================
 
     result = st.session_state.get(
-        "ocr_result"
+        "ocr_text"
     )
+
 
     if (
         result
-        and result[0] == uploaded.name
+        and result[0] == uploaded_file.name
     ):
 
-        filename = result[0]
         extracted_text = result[1]
-        used_model = result[2]
 
         st.success(
-            f"OCR complete — model: {used_model}"
+            "OCR completed successfully."
         )
 
-        st.subheader("📄 Extracted Text")
+        st.subheader(
+            "📄 Extracted Text"
+        )
 
         if extracted_text:
 
-            st.text_area(
-                "OCR Result",
-                extracted_text,
+            # ------------------------------------------------
+            # EDITABLE OCR RESULT
+            # ------------------------------------------------
+
+            edited_text = st.text_area(
+                "OCR result",
+                value=extracted_text,
                 height=400,
             )
+
 
             # ------------------------------------------------
             # DOWNLOAD TXT
@@ -410,19 +422,22 @@ if uploaded:
 
             st.download_button(
                 "⬇️ Download TXT",
-                extracted_text,
+                data=edited_text,
                 file_name="extracted_text.txt",
                 mime="text/plain",
             )
 
+
             # ------------------------------------------------
-            # COPY-FRIENDLY OUTPUT
+            # RAW OUTPUT
             # ------------------------------------------------
 
-            st.markdown("### Extracted text")
+            st.markdown(
+                "### Extracted text"
+            )
 
             st.code(
-                extracted_text,
+                edited_text,
                 language=None,
             )
 
