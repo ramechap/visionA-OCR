@@ -1065,9 +1065,9 @@ if st.session_state.pages:
                 )
                 
                 if used_model:
-                st.caption(
-                    f"OCR model used: {used_model}"
-                )
+                    st.caption(
+                        f"OCR model used: {used_model}"
+                    )
 
                 edited = st.text_area(
                     f"OCR Page {index + 1}",
