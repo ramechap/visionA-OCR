@@ -1,3 +1,7 @@
+
 streamlit
+opencv-python-headless
+numpy
 Pillow
 google-genai
+reportlab
