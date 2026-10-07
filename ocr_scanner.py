@@ -1041,15 +1041,32 @@ if st.session_state.pages:
             )
         ):
 
-            text = st.session_state.ocr_results.get(
+            result = st.session_state.ocr_results.get(
                 index,
+                {}
+            )
+            
+            text = result.get(
+                "text",
                 ""
             )
+            
+            used_model = result.get(
+                "model",
+                ""
+            )
+            
+            
 
             if text:
 
                 st.markdown(
                     f"### Page {index + 1}"
+                )
+                
+                if used_model:
+                st.caption(
+                    f"OCR model used: {used_model}"
                 )
 
                 edited = st.text_area(
