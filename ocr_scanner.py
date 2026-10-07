@@ -102,7 +102,13 @@ client = genai.Client(
 # MODEL
 # ============================================================
 
-MODEL = "gemini-3.8-flash"
+OCR_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+]
 
 
 # ============================================================
@@ -551,74 +557,106 @@ def image_part(image):
 # ============================================================
 # GEMINI OCR
 # ============================================================
+# ============================================================
+# GEMINI OCR WITH MODEL FALLBACK
+# ============================================================
 
 def run_ocr(image):
 
-    last_error = None
+    errors = []
 
-    for attempt in range(3):
+    for model in OCR_MODELS:
 
-        try:
+        # Try each model twice for temporary 503 errors.
+        for attempt in range(2):
 
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=[
-                    image_part(image),
-                    OCR_PROMPT,
-                ],
-            )
+            try:
 
-            if not response.text:
-
-                raise RuntimeError(
-                    "Gemini returned an empty OCR response."
+                response = client.models.generate_content(
+                    model=model,
+                    contents=[
+                        image_part(image),
+                        OCR_PROMPT,
+                    ],
                 )
 
-            return response.text.strip()
+                if not response.text:
 
-        except Exception as e:
-
-            last_error = e
-
-            message = str(e).upper()
-
-            # Temporary overload.
-            if (
-                "503" in message
-                or "UNAVAILABLE" in message
-            ):
-
-                if attempt < 2:
-
-                    wait = 3 * (
-                        attempt + 1
+                    raise RuntimeError(
+                        "Gemini returned an empty OCR response."
                     )
 
-                    time.sleep(
-                        wait
-                    )
+                return response.text.strip(), model
 
-                    continue
+            except Exception as e:
 
-            # Rate limit / quota.
-            if (
-                "429" in message
-                or "RESOURCE_EXHAUSTED" in message
-                or "QUOTA" in message
-            ):
+                message = str(e).upper()
 
-                raise RuntimeError(
-                    "Gemini API quota/rate limit exceeded.\n\n"
-                    + str(e)
+                errors.append(
+                    f"{model}: {str(e)}"
                 )
 
-            raise RuntimeError(
-                str(e)
-            )
+                # ------------------------------------------------
+                # 503 - TEMPORARY OVERLOAD
+                # ------------------------------------------------
+
+                if (
+                    "503" in message
+                    or "UNAVAILABLE" in message
+                ):
+
+                    if attempt == 0:
+
+                        time.sleep(3)
+
+                        continue
+
+                    # Both attempts failed.
+                    # Move to the next model.
+                    break
+
+                # ------------------------------------------------
+                # 429 - QUOTA / RATE LIMIT
+                # ------------------------------------------------
+
+                if (
+                    "429" in message
+                    or "RESOURCE_EXHAUSTED" in message
+                    or "QUOTA" in message
+                ):
+
+                    # Try another model.
+                    break
+
+                # ------------------------------------------------
+                # 404 - MODEL NOT AVAILABLE
+                # ------------------------------------------------
+
+                if (
+                    "404" in message
+                    or "NOT_FOUND" in message
+                ):
+
+                    # Try another model.
+                    break
+
+                # ------------------------------------------------
+                # OTHER ERROR
+                # ------------------------------------------------
+
+                raise RuntimeError(
+                    f"OCR failed using {model}:\n\n{e}"
+                )
+
+    # ------------------------------------------------------------
+    # ALL MODELS FAILED
+    # ------------------------------------------------------------
 
     raise RuntimeError(
-        f"OCR failed after retries:\n{last_error}"
+        "All Gemini OCR models failed.\n\n"
+        + "\n\n".join(errors)
     )
+
 
 
 # ============================================================
@@ -950,13 +988,16 @@ if st.session_state.pages:
 
                 try:
 
-                    text = run_ocr(
+                    text, used_model = run_ocr(
                         page["scanned"]
                     )
 
                     st.session_state.ocr_results[
                         index
-                    ] = text
+                    ] = {
+                        "text": text,
+                        "model": used_model,
+                    }
 
                 except Exception as e:
 
